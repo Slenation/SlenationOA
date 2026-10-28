@@ -1404,8 +1404,8 @@ app.post('/api/reactions/:apiKey', upload.fields([{ name: 'image' }, { name: 'au
         let imageUrl = "";
         let audioUrl = "";
 
-        const SUPABASE_URL = process.env.SUPABASE_URL || 'https://당신의프로젝트주소.supabase.co';
-        const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '당신의Publishable키';
+        const SUPABASE_URL = process.env.SUPABASE_URL || 'https://flkievnpxtntzzjgzjrl.supabase.co';
+        const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_lptB8eouSg90UNBn1BsHIg_vlirf7R3';
         const STORAGE_BUCKET = process.env.STORAGE_BUCKET || 'reactions';
         const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
