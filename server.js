@@ -11,6 +11,9 @@ const homeRouter = require('./home');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ⚠️ 필수 미들웨어: 폼 데이터 및 JSON 파싱 (이게 누락되면 req.body가 undefined로 나와 로그인/회원가입이 안 됩니다)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static(__dirname));
@@ -26,13 +29,11 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
                 { "alertSettings.useImage": { $exists: false } },
                 { $set: { "alertSettings.useImage": true, "alertSettings.useReaction": true } }
             );
-        } catch (e) {
-            // 초기 모델 로딩 전 에러 방지용
-        }
+        } catch (e) {}
     })
     .catch((err) => console.error('❌ MongoDB 연결 에러:', err));
 
-// 📌 유저 스키마 및 모델 정의 (모델 누락 에러 방지)
+// 2. 스키마 및 모델 정의
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
@@ -60,15 +61,41 @@ const userSchema = new mongoose.Schema({
         scrollInterval: { type: Number, default: 3 }
     }
 });
-const User = mongoose.model('User', userSchema);
+
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+const donationSchema = new mongoose.Schema({ streamerId: mongoose.Schema.Types.ObjectId, amount: Number, timestamp: Date, dateKey: String, nickname: String });
+const reactionSchema = new mongoose.Schema({ streamerId: mongoose.Schema.Types.ObjectId, name: String, amount: Number });
+
+const Donation = mongoose.models.Donation || mongoose.model('Donation', donationSchema); 
+const Reaction = mongoose.models.Reaction || mongoose.model('Reaction', reactionSchema);
+
+function getKSTDateTime() { 
+    return new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }); 
+}
+
+function getKSTDateKey() { 
+    const now = new Date(); 
+    const kstDate = new Date(now.getTime() + (9 * 60 * 60 * 1000)); 
+    return kstDate.toISOString().split('T')[0]; 
+}
+
+// 수동 재생을 위한 메모리스토어 예시 보존
+const manualPlayStore = {};
 
 // 홈 루트 라우터 연결
 app.use('/', homeRouter);
 
-// 📌 회원가입 처리 API (구문 오류 및 잘못된 else 구조 수정)
+// 📌 회원가입 처리 API
 app.post('/api/register', async (req, res) => {
     try {
         const { username, password } = req.body;
+        if (!username || !password) {
+            return res.send(`<script>alert('아이디와 비밀번호를 모두 입력해주세요.'); history.back();</script>`);
+        }
+        const existingUser = await User.findOne({ username });
+        if (existingUser) {
+            return res.send(`<script>alert('이미 존재하는 아이디입니다.'); history.back();</script>`);
+        }
         const apiKey = 'sely_' + crypto.randomBytes(16).toString('hex');
         const newUser = new User({ username, password, apiKey });
         await newUser.save();
@@ -113,7 +140,6 @@ app.post('/api/login', async (req, res) => {
             return res.send(`<script>alert('아이디 또는 비밀번호가 틀렸습니다.'); history.back();</script>`);
         }
 
-        // 로그인 성공 시 대시보드 화면 전송
         res.send(`<!DOCTYPE html>
         <html lang="ko">
         <head>
@@ -137,9 +163,34 @@ app.post('/api/login', async (req, res) => {
         </body>
         </html>`);
     } catch (e) {
-        console.error(e);
+        console.error("로그인 에러:", e);
         res.status(500).send('Server Error');
     }
+});
+
+// 📌 회원가입 페이지 라우트
+app.get('/register', (req, res) => {
+    res.send(`<!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"><title>스트리머 회원가입</title></head>
+    <body style="font-family:sans-serif; background:#f4f7f6; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
+        <div style="background:white; padding:30px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1); width:300px;">
+            <h2>스트리머 회원가입</h2>
+            <form action="/api/register" method="POST">
+                <div style="margin-bottom:15px;">
+                    <label>아이디</label><br>
+                    <input type="text" name="username" style="width:100%; padding:8px; margin-top:5px;" required>
+                </div>
+                <div style="margin-bottom:15px;">
+                    <label>비밀번호</label><br>
+                    <input type="password" name="password" style="width:100%; padding:8px; margin-top:5px;" required>
+                </div>
+                <button type="submit" style="width:100%; padding:10px; background:#ff4757; color:white; border:none; border-radius:5px; font-weight:bold; cursor:pointer;">가입하기</button>
+            </form>
+            <p style="text-align:center; margin-top:15px;"><a href="/login">이미 계정이 있으신가요? 로그인</a></p>
+        </div>
+    </body>
+    </html>`);
 });
 
 // 메뉴판 설정 저장 API
@@ -174,7 +225,7 @@ app.get('/menu-overlay/:apiKey', async (req, res) => {
         const user = await User.findOne({ apiKey });
         if (!user) return res.status(404).send('Streamer not found');
 
-        const reactions = global.Reaction ? await Reaction.find({ streamerId: user._id }).sort({ amount: 1 }) : [];
+        const reactions = await Reaction.find({ streamerId: user._id }).sort({ amount: 1 });
         const menuSettings = user.menuSettings || {
             textColor: '#ff2a85',
             fontSize: '24px',
@@ -227,91 +278,74 @@ app.get('/menu-overlay/:apiKey', async (req, res) => {
     }
 });
 
-// 회원가입 페이지 라우트
-app.get('/register', (req, res) => {
-    res.send(`<!DOCTYPE html>
-    <html>
-    <head><meta charset="UTF-8"><title>스트리머 회원가입</title></head>
-    <body style="font-family:sans-serif; background:#f4f7f6; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
-        <div style="background:white; padding:30px; border-radius:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1); width:300px;">
-            <h2>스트리머 회원가입</h2>
-            <form action="/api/register" method="POST">
-                <div style="margin-bottom:15px;">
-                    <label>아이디</label><br>
-                    <input type="text" name="username" style="width:100%; padding:8px; margin-top:5px;" required>
-                </div>
-                <div style="margin-bottom:15px;">
-                    <label>비밀번호</label><br>
-                    <input type="password" name="password" style="width:100%; padding:8px; margin-top:5px;" required>
-                </div>
-                <button type="submit" style="width:100%; padding:10px; background:#ff4757; color:white; border:none; border-radius:5px; font-weight:bold; cursor:pointer;">가입하기</button>
-            </form>
-            <p style="text-align:center; margin-top:15px;"><a href="/login">이미 계정이 있으신가요? 로그인</a></p>
-        </div>
-    </body>
-    </html>`);
-});
-
 // 스트리머별 OBS 알림 오버레이 화면
 app.get('/overlay/:apiKey', async (req, res) => {
-    const { apiKey } = req.params;
-    const user = await User.findOne({ apiKey });
-    if (!user) return res.status(404).send('Streamer not found');
+    try {
+        const { apiKey } = req.params;
+        const user = await User.findOne({ apiKey });
+        if (!user) return res.status(404).send('Streamer not found');
 
-    const settings = user.alertSettings || {};
-    const fontFamily = settings.fontFamily || 'Jalnan2, sans-serif';
+        const settings = user.alertSettings || {};
+        const fontFamily = settings.fontFamily || 'Jalnan2, sans-serif';
 
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>SelyPay Alert Overlay</title>
-            <style>
-                body { background: transparent; margin: 0; overflow: hidden; font-family: ${fontFamily}; }
-                #alert-container { width: 100vw; height: 100vh; display: none; flex-direction: column; justify-content: flex-start; align-items: center; text-align: center; box-sizing: border-box; padding: 2vh 3vw; }
-            </style>
-        </head>
-        <body>
-            <div id="alert-container">
-                <div id="alert-line1"></div>
-            </div>
-        </body>
-        </html>
-    `);
+        res.send(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>SelyPay Alert Overlay</title>
+                <style>
+                    body { background: transparent; margin: 0; overflow: hidden; font-family: ${fontFamily}; }
+                    #alert-container { width: 100vw; height: 100vh; display: none; flex-direction: column; justify-content: flex-start; align-items: center; text-align: center; box-sizing: border-box; padding: 2vh 3vw; }
+                </style>
+            </head>
+            <body>
+                <div id="alert-container">
+                    <div id="alert-line1"></div>
+                </div>
+            </body>
+            </html>
+        `);
+    } catch (e) {
+        res.status(500).send('Overlay Error');
+    }
 });
 
 // 방송용 실시간 랭킹 OBS 오버레이 화면
 app.get('/ranking-overlay/:apiKey', async (req, res) => {
-    const { apiKey } = req.params;
-    const user = await User.findOne({ apiKey });
-    if (!user) return res.status(404).send('Streamer not found');
-    
-    res.send(`<!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>SelyPay Ranking Overlay</title>
-        <style>
-            body { background-color: transparent; margin: 0; font-family: 'Malgun Gothic', sans-serif; }
-            .ranking-board { background: rgba(0, 0, 0, 0.75); color: white; padding: 20px; border-radius: 10px; width: fit-content; min-width: 250px; }
-        </style>
-    </head>
-    <body>
-        <div class="ranking-board">
-            <h3>🏆 오늘의 후원 랭킹</h3>
-            <div id="ranking-content">불러오는 중...</div>
-        </div>
-    </body>
-    </html>`);
+    try {
+        const { apiKey } = req.params;
+        const user = await User.findOne({ apiKey });
+        if (!user) return res.status(404).send('Streamer not found');
+        
+        res.send(`<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>SelyPay Ranking Overlay</title>
+            <style>
+                body { background-color: transparent; margin: 0; font-family: 'Malgun Gothic', sans-serif; }
+                .ranking-board { background: rgba(0, 0, 0, 0.75); color: white; padding: 20px; border-radius: 10px; width: fit-content; min-width: 250px; }
+            </style>
+        </head>
+        <body>
+            <div class="ranking-board">
+                <h3>🏆 오늘의 후원 랭킹</h3>
+                <div id="ranking-content">불러오는 중...</div>
+            </div>
+        </body>
+        </html>`);
+    } catch (e) {
+        res.status(500).send('Ranking Overlay Error');
+    }
 });
 
-// 기타 API 라우트들
+// 기타 API 라우트들 (로그, 랭킹, 수동 재생 등 원본 기능 완벽 보존)
 app.get('/api/logs/:apiKey', async (req, res) => {
     try {
         const user = await User.findOne({ apiKey: req.params.apiKey });
         if (!user) return res.status(404).json([]);
-        const logs = global.Donation ? await Donation.find({ streamerId: user._id }).sort({ timestamp: -1 }).limit(50) : [];
+        const logs = await Donation.find({ streamerId: user._id }).sort({ timestamp: -1 }).limit(50);
         res.json(logs);
     } catch (e) {
         res.status(500).json([]);
@@ -322,14 +356,40 @@ app.get('/api/reactions/:apiKey', async (req, res) => {
     try {
         const user = await User.findOne({ apiKey: req.params.apiKey });
         if (!user) return res.status(404).json([]);
-        const reactions = global.Reaction ? await Reaction.find({ streamerId: user._id }).sort({ amount: 1 }) : [];
+        const reactions = await Reaction.find({ streamerId: user._id }).sort({ amount: 1 });
         res.json(reactions);
     } catch (e) {
         res.status(500).json([]);
     }
 });
 
+app.get('/api/ranking/:apiKey', async (req, res) => {
+    try {
+        const user = await User.findOne({ apiKey: req.params.apiKey });
+        if (!user) return res.status(404).json([]);
+        const todayKey = getKSTDateKey();
+        const todayDonations = await Donation.find(
+            { streamerId: user._id, dateKey: todayKey },
+            { nickname: 1, amount: 1, timestamp: 1 }
+        ).sort({ timestamp: 1 });
+        res.json(todayDonations);
+    } catch (e) {
+        res.status(500).json([]);
+    }
+});
+
+app.get('/api/manual-play/:apiKey', async (req, res) => {
+    const apiKey = req.params.apiKey;
+    if (manualPlayStore[apiKey] && manualPlayStore[apiKey].length > 0) {
+        const items = [...manualPlayStore[apiKey]];
+        manualPlayStore[apiKey] = [];
+        res.json(items);
+    } else {
+        res.json([]);
+    }
+});
+
 // 서버 구동
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}[cite: 2]`);
+    console.log(`Server is running on port ${PORT}`);
 });
